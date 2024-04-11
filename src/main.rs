@@ -11,6 +11,7 @@ use embassy_executor::Spawner;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_time::{Duration, Timer};
 use embedded_hal::{delay::DelayNs as _, digital::OutputPin as _};
+use uc8151::UpdateRegion;
 use {defmt_rtt as _, panic_probe as _};
 
 use embedded_graphics::primitives::PrimitiveStyleBuilder;
@@ -62,7 +63,7 @@ static FERRIS_IMG: &[u8; 2622] = include_bytes!("../ferris_1bpp.bmp");
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
-static CHANNEL: Channel<CriticalSectionRawMutex, LedState, 1> = Channel::new();
+static CHANNEL: Channel<CriticalSectionRawMutex, &'static str, 1> = Channel::new();
 
 enum LedState {
     On,
@@ -201,11 +202,14 @@ async fn main(_spawner: Spawner) {
         unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
         move || {
             let executor1 = EXECUTOR1.init(Executor::new());
-            executor1.run(|spawner| unwrap!(spawner.spawn(core1_task(led))));
+            executor1.run(|spawner| {
+                unwrap!(spawner.spawn(core1_task(led)));
+                unwrap!(spawner.spawn(text_sender()));
+            });
         },
     );
 
-    return;
+    //return;
 
     info!("Hello from core 0");
     loop {
@@ -220,31 +224,23 @@ async fn main(_spawner: Spawner) {
             .alignment(HorizontalAlignment::Center)
             .paragraph_spacing(6)
             .build();
-        let bounds = Rectangle::new(Point::new(157, 10), Size::new(uc8151::WIDTH - 157, 0));
+        let bounds = Rectangle::new(
+            Point::new(157, 0),
+            Size::new(uc8151::WIDTH - 157, uc8151::HEIGHT),
+        );
         _ = bounds
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
             .draw(&mut display);
 
         // Create the text box and apply styling options.
-        let text = "in loop";
+        let text = CHANNEL.receive().await;
         let text_box = TextBox::with_textbox_style(text, bounds, character_style, textbox_style);
 
         // Draw the text box.
         _ = text_box.draw(&mut display);
-        display.update().unwrap();
-
-        //       CHANNEL.send(LedState::On).await;
-        Timer::after_millis(100).await;
-
-        // Create the text box and apply styling options.
-        let text = "in loop";
-        let text_box = TextBox::with_textbox_style(text, bounds, character_style, textbox_style);
-
-        // Draw the text box.
-        _ = text_box.draw(&mut display);
-        display.update().unwrap();
-        //        CHANNEL.send(LedState::Off).await;
-        Timer::after_millis(400).await;
+        let _region: UpdateRegion = bounds.try_into().unwrap();
+        display.partial_update(bounds.try_into().unwrap()).unwrap();
+        //display.update().unwrap();
     }
 }
 
@@ -257,5 +253,15 @@ async fn core1_task(mut led: Output<'static, embassy_rp::peripherals::PIN_25>) {
 
         led.set_low();
         Timer::after_millis(400).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn text_sender() {
+    loop {
+        CHANNEL.send("Hello from\ncore 0").await;
+        Timer::after_millis(5000).await;
+        CHANNEL.send("Hello again\ncore 0").await;
+        Timer::after_millis(5000).await;
     }
 }
